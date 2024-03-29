@@ -123,10 +123,12 @@ connectGraph (graph_t* g)
 }
 
 void dot_position(graph_t *g) {
+    nodes_to_stderr("before dot_potition()", g);
     if (GD_nlist(g) == NULL)
 	return;			/* ignore empty graph */
     mark_lowclusters(g);	/* we could remove from splines.c now */
     set_ycoords(g);
+    nodes_to_stderr("after FIRST set_y_coords()", g);
     if (Concentrate)
 	dot_concentrate(g);
     expand_leaves(g);
@@ -144,6 +146,7 @@ void dot_position(graph_t *g) {
     remove_aux_edges(g);	/* must come after set_aspect since we now
 				 * use GD_ln and GD_rn for bbox width.
 				 */
+    nodes_to_stderr("after dot_potition()", g);
 }
 
 static int nsiter2(graph_t * g)
@@ -534,9 +537,16 @@ static void compress_graph(graph_t * g)
 
 static void create_aux_edges(graph_t * g)
 {
+    nodes_to_stderr("before create_aux_edges", g);
     allocate_aux_edges(g);
+
+    nodes_to_stderr("before make_LR_constraints()", g);
     make_LR_constraints(g);
+    nodes_to_stderr("after make_LR_constraints()", g);
+
     make_edge_pairs(g);
+    nodes_to_stderr("after make_edge_pairs()", g);
+
     pos_clusters(g);
     compress_graph(g);
 }
@@ -786,6 +796,7 @@ static void set_ycoords(graph_t * g)
 	    }
 	}
     }
+    nodes_to_stderr(" after SCAN in set_y_coords()", g);
 
     /* scan sub-clusters */
     lbl = clust_ht(g);
@@ -807,6 +818,7 @@ static void set_ycoords(graph_t * g)
 #endif
 	maxht = fmax(maxht, delta);
     }
+    nodes_to_stderr(" after initial assignment in set_y_coords()", g);
 
     /* If there are cluster labels and the drawing is rotated, we need special processing to
      * allocate enough room. We use adjustRanks for this, and then recompute the maxht if
@@ -828,6 +840,7 @@ static void set_ycoords(graph_t * g)
 	}
     }
 
+    nodes_to_stderr(" before re-assign in set_y_coords()", g);
     /* re-assign if ranks are equally spaced */
     if (GD_exact_ranksep(g)) {
 	for (r = GD_maxrank(g) - 1; r >= GD_minrank(g); r--)

@@ -205,12 +205,14 @@ void init_rank(void)
     }
 
     while ((v = queue_pop(&Q))) {
+	fprintf(stderr, "  init_simplex_rank(): Processing:"); node_to_stderr(v);
 	ND_rank(v) = 0;
 	ctr++;
 	for (i = 0; (e = ND_in(v).list[i]); i++)
 	    ND_rank(v) = MAX(ND_rank(v), ND_rank(agtail(e)) + ED_minlen(e));
 	for (i = 0; (e = ND_out(v).list[i]); i++) {
 	    if (--ND_priority(aghead(e)) <= 0)
+		fprintf(stderr, "  init_simples_rank():    queueing:"); node_to_stderr(aghead(e));
 		queue_push(&Q, aghead(e));
 	}
     }
@@ -273,6 +275,7 @@ static void dfs_enter_outedge(node_t * v)
     int i, slack;
     edge_t *e;
 
+    fprintf(stderr, "  dfs_enter_outedge: search_node: "); node_to_stderr(v);
     for (i = 0; (e = ND_out(v).list[i]); i++) {
 	if (!TREE_EDGE(e)) {
 	    if (!SEQ(Low, ND_lim(aghead(e)), Lim)) {
@@ -295,11 +298,13 @@ static void dfs_enter_inedge(node_t * v)
     int i, slack;
     edge_t *e;
 
+    fprintf(stderr, "  dfs_enter_inedge: search_node: "); node_to_stderr(v);
     for (i = 0; (e = ND_in(v).list[i]); i++) {
 	if (!TREE_EDGE(e)) {
 	    if (!SEQ(Low, ND_lim(agtail(e)), Lim)) {
 		slack = SLACK(e);
 		if (slack < Slack || Enter == NULL) {
+                    fprintf(stderr, "  dfs_enter_inedge: selected edge: "); edge_to_stderr(e);
 		    Enter = e;
 		    Slack = slack;
 		}
@@ -336,6 +341,8 @@ static edge_t *enter_edge(edge_t * e)
     Slack = INT_MAX;
     Low = ND_low(v);
     Lim = ND_lim(v);
+
+    fprintf(stderr, "Going to select: %s %i-%i: search_node:", outsearch ? "Out" : "In", Low, Lim); node_to_stderr(v);
     if (outsearch)
 	dfs_enter_outedge(v);
     else
@@ -346,6 +353,7 @@ static edge_t *enter_edge(edge_t * e)
 static void init_cutvalues(void)
 {
     dfs_range_init(GD_nlist(G), NULL, 1);
+    // nodes_to_stderr("before dfs_cutval in init_cutvalues()", G);
     dfs_cutval(GD_nlist(G), NULL);
 }
 
@@ -411,6 +419,8 @@ static int tight_subtree_search(Agnode_t *v, subtree_t *st)
     int     i;
     int     rv;
 
+    fprintf(stderr, "   > tight_subtree_search() for "); node_to_stderr(v);
+
     rv = 1;
     
     // Store the subtree of this node in the node itself, so you
@@ -441,6 +451,9 @@ static int tight_subtree_search(Agnode_t *v, subtree_t *st)
                rv += tight_subtree_search(aghead(e),st);
         }
     }
+
+    fprintf(stderr, "   < tight_subtree_search() for "); node_to_stderr(v);
+
     // Return the size of the subtree, so that the calling
     // function can add this to the size of its
     return rv;
@@ -454,6 +467,9 @@ static int tight_subtree_search(Agnode_t *v, subtree_t *st)
 static subtree_t *find_tight_subtree(Agnode_t *v)
 {
     subtree_t       *rv;
+
+    fprintf(stderr, "find_tight_subtree() for node: "); node_to_stderr(v);
+
     rv = gv_alloc(sizeof(subtree_t));
     rv->magic = SUB_TREE_MAGIC;
     rv->rep = v;
@@ -778,6 +794,8 @@ int feasible_tree(void)
 
   /* incrementally merge subtrees */
   heap = STbuildheap(tree,subtree_count);
+  fprintf(stderr, "HEAP SIZE: %i: %i\n", STheapsize(heap), subtree_count);
+  nodes_to_stderr("after find_tight_subtree()", G);
   while (STheapsize(heap) > 1) {
     // Choose the smallest remaining subtree to merge.
     tree0 = STextractmin(heap);
@@ -787,6 +805,8 @@ int feasible_tree(void)
       error = 1;
       break;
     }
+    fprintf(stderr, "Merging with edge: "); edge_to_stderr(ee);
+
     // Merge the subtrees
     tree1 = merge_trees(ee);
     if (tree1 == NULL) {
@@ -799,6 +819,7 @@ int feasible_tree(void)
     // tree itself is the heap index!
     STheapify(heap,tree1->heap_index);
   }
+  nodes_to_stderr("after merge_trees()", G);
 
 end:
   free(heap);
@@ -807,6 +828,7 @@ end:
   if (error) return error;
   assert(Tree_edge.size == N_nodes - 1);
   init_cutvalues();
+  nodes_to_stderr("after init_cutvalues() in feasible_tree()", G);
   return 0;
 }
 
@@ -865,6 +887,8 @@ static void rerank(Agnode_t * v, int delta)
     int i;
     edge_t *e;
 
+    char *name = ND_label(v) ? ND_label(v)->text : "-";
+    fprintf(stderr, "Reranking %s by %i from %i to %i\n", name, delta, ND_rank(v), ND_rank(v) - delta);
     ND_rank(v) -= delta;
     for (i = 0; (e = ND_tree_out(v).list[i]); i++)
 	if (e != ND_par(v))
@@ -887,6 +911,9 @@ update(edge_t * e, edge_t * f)
     Agnode_t *lca;
 
     delta = SLACK(f);
+    
+    fprintf(stderr, "Exchanging edges with slack %i:\n    remove from tree: ", delta); edge_to_stderr(e);
+    fprintf(stderr, "        add to tree: "); edge_to_stderr(f);
     /* "for (v = in nodes in tail side of e) do ND_rank(v) -= delta;" */
     if (delta > 0) {
 	size_t s = ND_tree_in(agtail(e)).size + ND_tree_out(agtail(e)).size;
