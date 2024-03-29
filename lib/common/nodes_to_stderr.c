@@ -15,6 +15,9 @@
 
 #include <common/render.h>
 
+// All of the following macros and sub_tree_t is duplicate code from ns.c
+// and should be consolidated.
+
 #define SUB_TREE_MAGIC 32123
 #define HAS_SUB_TREE(n) (ND_subtree(n) && (ND_subtree(n))->magic == SUB_TREE_MAGIC)
 
@@ -22,6 +25,14 @@
 #define SLACK(e)	(LENGTH(e) - ED_minlen(e))
 #define ND_subtree(n)	(subtree_t*)ND_par(n)
 #define TREE_EDGE(e)	(ED_tree_index(e) >= 0)
+
+typedef struct subtree_s {
+        int magic;       // always true KAP
+        node_t *rep;            /* some node in the tree */
+        int    size;            /* total tight tree size */
+        int    heap_index;      /* required to find non-min elts when merged */
+        struct subtree_s *par;  /* union find */
+} subtree_t;
 
 void edge_to_stderr(edge_t *e) {
     node_t *head, *tail;
@@ -51,10 +62,6 @@ void node_to_stderr(node_t *n) {
     char par_str[255];
     if (par_n == NULL) {
 	sprintf(par_str, "NULL");
-    } else {
-	sprintf(par_str, "SUBTREE");
-    }
-/*
     } else if (!HAS_SUB_TREE(n)) {
 	node_t *head, *tail;
 	head = aghead(par_n);
@@ -69,7 +76,9 @@ void node_to_stderr(node_t *n) {
 	} else {
 	    sprintf(par_str, "UNKNOWN(%p)", par_n);
 	}
-*/
+    } else {
+	sprintf(par_str, "SUBTREE");
+    }
 
     // AGID(n) does not seem useful as an identifier it changes each run
     fprintf(stderr, "%s (%p): type=%i rank=%i in=%i out=%i coords:(%f, %f) TreeParent:%s min:%i max:%i ",
@@ -77,15 +86,15 @@ void node_to_stderr(node_t *n) {
     fprintf(stderr, "%s (%p): type=%i rank=%i in=%i out=%i coords:(%f, %f) TreeParent:%s min:%i max:%i ",
 	name, *n, ND_node_type(n), ND_rank(n), in, out, ND_coord(n).x, ND_coord(n).y, par_str, ND_low(n), ND_lim(n));
 
-/*    if (HAS_SUB_TREE(n)) {
+    if (HAS_SUB_TREE(n)) {
 	subtree_t *st = ND_subtree(n);
 	char *cur_name = st->rep && ND_label(st->rep) ? ND_label(st->rep)->text : "-";
 	void *par_name = st->par && st->par->rep && ND_label(st->par->rep) ? ND_label(st->par->rep)->text : "-";
 
 	fprintf(stderr, "sub_tree: node:%s size:%i parent:%s heap:%i\n", cur_name, st->size, par_name, st->heap_index);
-    } else { */
+    } else {
 	fprintf(stderr, "NO SUB_TREE\n");
-    // }
+    }
 }
 
 void nodes_to_stderr(char *title, graph_t *g) {
