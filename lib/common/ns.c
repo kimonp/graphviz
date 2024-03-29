@@ -354,6 +354,8 @@ static void init_cutvalues(void)
 #define ND_subtree(n) (subtree_t*)ND_par(n)
 #define ND_subtree_set(n,value) (ND_par(n) = (edge_t*)value)
 
+#define SUB_TREE_MAGIC 32123
+
 // An "elt" seems to be the pointer to the subtree_s in held in each heap element.
 // * heap_index is used for two purposes:
 //   * To tell if a subtree is in the heap or not (-1)
@@ -361,6 +363,7 @@ static void init_cutvalues(void)
 //     so that the heap can be effeciently re-heapified, since the merged tree
 //     probably increased in size.
 typedef struct subtree_s {
+        int magic;       // always true KAP
         node_t *rep;            /* some node in the tree */
         int    size;            /* total tight tree size */
         int    heap_index;      /* required to find non-min elts when merged */
@@ -452,6 +455,7 @@ static subtree_t *find_tight_subtree(Agnode_t *v)
 {
     subtree_t       *rv;
     rv = gv_alloc(sizeof(subtree_t));
+    rv->magic = SUB_TREE_MAGIC;
     rv->rep = v;
     rv->size = tight_subtree_search(v,rv);
     if (rv->size < 0) {
@@ -758,6 +762,8 @@ int feasible_tree(void)
   // than nodes, since multiple nodes may be in a subtree.
   subtree_t **tree = gv_calloc(N_nodes, sizeof(subtree_t *));
   /* given init_rank, find all tight subtrees */
+
+  nodes_to_stderr("before find_tight_subtree() in feasible_tree()", G);
   // Populate "tree" with all the subtrees we can find in the graph.
   for (n = GD_nlist(G); n; n = ND_next(n)) {
         if (ND_subtree(n) == 0) {

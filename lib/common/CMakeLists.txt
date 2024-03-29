@@ -77,6 +77,7 @@ add_library(common_obj OBJECT
   input.c
   intset.c
   labels.c
+  nodes_to_stderr.c
   ns.c
   memory.c
   output.c

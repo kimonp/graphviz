@@ -113,6 +113,12 @@ extern "C" {
 	double sizex, double sizey, splineInfo * sinfo);
     RENDER_API textlabel_t *make_label(void *obj, char *str, int kind, double fontsize, char *fontname, char *fontcolor);
     RENDER_API bezier *new_spline(edge_t *e, size_t sz);
+
+    RENDER_API void nodes_to_stderr(char *title, graph_t *g);
+    RENDER_API void node_to_stderr(node_t *g);
+    RENDER_API void edge_to_stderr(edge_t *e);
+    RENDER_API void print_stack_trace(void);
+
     RENDER_API char **parse_style(char *s);
     RENDER_API void place_graph_label(Agraph_t *);
     RENDER_API int place_portlabel(edge_t * e, bool head_p);
