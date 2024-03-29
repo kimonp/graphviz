@@ -257,6 +257,11 @@ make_LR_constraints(graph_t * g)
 		}
 		ND_rw(u) += sw;	/* increment to include self edges */
 	    }
+	    // For every node in the rank, set the "simplex_rank" to the previous rank + node_sep.
+	    //
+	    // THIS is the critical area that takes all the done in the ordering phase (figuring out
+	    // the position of each rank), and uses it to initialize the position phase by translating it into
+	    // the simplex rank.  This will eventially become the x coordinate.
 	    v = rank[i].v[j + 1];
 	    if (v) {
 		width = ND_rw(u) + ND_lw(v) + nodesep;
