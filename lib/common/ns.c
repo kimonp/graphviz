@@ -1,6 +1,14 @@
 /**
  * @file
  * @brief Network Simplex algorithm for ranking nodes of a DAG, @ref rank, @ref rank2
+ * 
+ * The theory behind using network simplex for graph layout is described in the paper:
+ * * A Technique for Drawing Directed Graphs (1993): https://graphviz.org/documentation/TSE93.pdf
+ * * This paper is referred to in the comments bellow as: TSE93
+ * * Methods are commented to refer back to TSE93 so that one reading the
+ *   paper can better follow the implementation.
+ * * However, the implementation will inevitable vary somewhat from the paper,
+ *   especially for optimizations.
  */
 
 /*************************************************************************
@@ -35,7 +43,9 @@ static void check_cycles(graph_t * g);
 
 #define LENGTH(e)		(ND_rank(aghead(e)) - ND_rank(agtail(e)))
 #define SLACK(e)		(LENGTH(e) - ED_minlen(e))
+// SEQ returns true if a, b and c are in a sequence where they do not decrease: a <= b <= c
 #define SEQ(a,b,c)		((a) <= (b) && (b) <= (c))
+// True if e is part of the current feasible tree.
 #define TREE_EDGE(e)	(ED_tree_index(e) >= 0)
 
 static graph_t *G;
@@ -46,16 +56,15 @@ static int Search_size;
 static nlist_t Tree_node;
 static elist Tree_edge;
 
-// Add and edge to a tight subtree of the graph.
+// Add and edge to a "tight" subtree of the graph.
 // 
-// However, the edge does not retain which subtree it is a member of.
-// That can be looked up by either the head or tail node, which must be
-// part of the same subtree.
+// Caller must ensure that the edge is "tight" (has zero slack).
+// 
+// NOTE: The edge itself does not retain which subtree it is a member of.
+//       That can be looked up by either the head or tail node, which must be
+//       part of the same subtree.
 //
-// Note that not all edges in the graph will necessarily be edges a subtree:
-// they must be "tight" edges (rank increases by 1)
-//
-// KAP: Set the following variables for both the head and tail nodes of edge (if they have not yet been added)
+// Set the following variables for both the head and tail nodes of edge (if they have not yet been added)
 // * ND_mark(n) (just so you don't add nodes more than once)
 // * Add head and tail to: Trkee_node.list
 // * For the head node:
@@ -67,7 +76,7 @@ static elist Tree_edge;
 static int add_tree_edge(edge_t * e)
 {
     node_t *n;
-    //fprintf(stderr,"add tree edge %p %s ", (void*)e, agnameof(agtail(e))) ; fprintf(stderr,"%s\n", agnameof(aghead(e))) ;
+
     if (TREE_EDGE(e)) {
 	agerr(AGERR, "add_tree_edge: missing tree edge\n");
 	return -1;
@@ -98,11 +107,10 @@ static int add_tree_edge(edge_t * e)
     return 0;
 }
 
-/**
- * Invalidate DFS attributes by walking up the tree from to_node till lca
- * (inclusively). Called when updating tree to improve pruning in dfs_range().
- * Assigns ND_low(n) = -1 for the affected nodes.
- */
+// Invalidate DFS attributes by walking up the tree from to_node till lca (inclusively).
+//
+// Called when updating tree to improve pruning in dfs_range().
+// Assigns ND_low(n) = -1 for the affected nodes.
 static void invalidate_path(node_t *lca, node_t *to_node) {
     while (true) {
         if (ND_low(to_node) == -1)
@@ -127,11 +135,11 @@ static void invalidate_path(node_t *lca, node_t *to_node) {
     }
 }
 
-// Replace edge e with edge f in the tree and remove edge f from the tree.
+// Replace edge e with edge f in the feasible tree and remove edge f from the tree.
 // 
 // * The Tree_edge list is a list of all edges currently in the tree.
 // * Each edge in the tree has a field to store their index into Tree_edge.
-//   * Tree_edge[e] is replaced with f
+//   * Tree_edge.list[e] is replaced with f
 // * Each node keeps a list of which edges it holds which are in the tree.
 //   * For the head and tail of e, remove e from that node's list of tree edges
 //   * For the head and tail of f, add e to that node's list of tree edges
@@ -167,15 +175,12 @@ static void exchange_tree_edges(edge_t * e, edge_t * f)
     ND_tree_in(n).list[ND_tree_in(n).size] = NULL;
 }
 
-// init_rank() does an inital ranking to start things off.
+// init_rank() does an inital ranking to start things off for network simplex.
 //
-// QUESTION: Where and what are rank values set to before init_rank()?
-//           This is important because it uses the current values of ranks
-//           to initialize the ranks.  It seems like it expects them to be set to
-//           zero or some baseline to begin with, but I have not found where
-//           that is done.
+// NOTE: Only called by rank2() if any edge has slack less than the minimum.
+// * Thus, if ranks have not been assigned, init_rank() is called.
 //
-// This ranking will be subsequently modified by the network simplex ranking mechanism
+// This ranking will be subsequently modified by the network simplex ranking mechanism.
 // * All nodes with no incoming edges are placed in a queue.
 // * While we can pull the top node off the queue:
 //   * Pull the top node of the queue and make it the current node.
@@ -187,8 +192,21 @@ static void exchange_tree_edges(edge_t * e, edge_t * f)
 //         in queue are ranked zero.
 //   * for each outgoing edge of the current node
 //
-// KAP: only called by rank2() if there are any edge has slack less than the minimum.
-// * Thus, if ranks have not been assigned, init_rank() is called.
+// QUESTION: Where and what are rank values set to before init_rank()?
+//           This is important because it uses the current values of ranks
+//           to initialize the ranks.  It seems like it expects them to be set to
+//           zero or some baseline to begin with, but I have not found where
+//           that is done.
+//
+// Documentation from TSE93 (page 9):
+// * Nodes with no unscanned in-edges are placed in a queue.
+//   * CLARIFICATION: First place all nodes with no in-edges in a queue.
+// * As nodes are taken off the queue, they are assigned the least rank
+//   that satisfies their in-edges, and their out-edges are marked as scanned.
+// * In the simplist case, where minLength() == 1 for all edges, this corresponds
+//   to viewing the graph as a poset (partially ordered set) and assigning the
+//   the minimal elements to rank 0.  These nodes are removed from the poset and the
+//   new set of minimal elements are assigned rank 1, etc
 static
 void init_rank(void)
 {
@@ -225,10 +243,16 @@ void init_rank(void)
 
 // Return an edge in the feasible tree with a negative cut value, otherwise NULL.
 // 
-// S_i is the index to start the search.  If not found to the end, loop around to
-// zero and search up to S_i.  This is to support a finding in the paper that
-// network simplex is much more effecient if you choose the next edge cyclically,
-// instead of always starting the search from the beginning.
+// S_i is the index (global) to start the search.  If not found to the end, loop around to
+// zero and search up to S_i.  This is to support TSE93 page 13 below.
+// 
+// TSE93 (page 9): leave_edge returns a tree edge with a negative cut value, or nil if
+// there is none, meaning the solution is optimal.  Any edge with a negative cut value may
+// be selected as the edge to remove.
+// 
+// TSE93 (page 13): The network simplex is also very sensitive to the choice of the negative
+// edge to replace.  We observed that searching cyclically through all the tree edges, instead of
+// searching from the beginning of the list of tree edges every time, can save many iterations.
 static edge_t *leave_edge(void)
 {
     edge_t *f, *rv = NULL;
@@ -268,6 +292,7 @@ static edge_t *leave_edge(void)
 static edge_t *Enter;
 static int Low, Lim, Slack;
 
+// Depth first search helper function for: enter_edge()
 static void dfs_enter_outedge(node_t * v)
 {
     int i, slack;
@@ -290,6 +315,7 @@ static void dfs_enter_outedge(node_t * v)
 	    dfs_enter_outedge(agtail(e));
 }
 
+// Depth first search helper function for: enter_edge()
 static void dfs_enter_inedge(node_t * v)
 {
     int i, slack;
@@ -312,13 +338,13 @@ static void dfs_enter_inedge(node_t * v)
 	    dfs_enter_inedge(aghead(e));
 }
 
-// Given a tree edge, return the non-tree edge with the lowest remaining cut-value
+// Given a feasible tree edge, return a non-tree edge with the lowest remaining cut-value.
 //
-// Documentation from paper:
+// TSE93 (Page 9):
 // * enter_edge ﬁnds a non-tree edge to replace e.
 //   * This is done by breaking the edge e, which divides the tree into a head and tail component.
 //   * All edges going from the head component to the tail are considered, with an edge of minimum slack being chosen.
-//   * This is necessary to maintain feasibility
+//   * This is necessary to maintain feasibility.
 static edge_t *enter_edge(edge_t * e)
 {
     node_t *v;
@@ -343,6 +369,7 @@ static edge_t *enter_edge(edge_t * e)
     return Enter;
 }
 
+// Initialize edge cutvalues and also intialize node parent and range fields.
 static void init_cutvalues(void)
 {
     dfs_range_init(GD_nlist(G), NULL, 1);
@@ -354,7 +381,6 @@ static void init_cutvalues(void)
 #define ND_subtree(n) (subtree_t*)ND_par(n)
 #define ND_subtree_set(n,value) (ND_par(n) = (edge_t*)value)
 
-// An "elt" seems to be the pointer to the subtree_s in held in each heap element.
 // * heap_index is used for two purposes:
 //   * To tell if a subtree is in the heap or not (-1)
 //   * When a tree is merged, to know what its index into the heap is
@@ -367,10 +393,13 @@ typedef struct subtree_s {
         struct subtree_s *par;  /* union find */
 } subtree_t;
 
-// Finds a tight subtree from node v.
+// Finds a tight subtree starting from node v.
+// 
+// Main helper function for: find_tight_subtree()
 //
-// So given a node, finds all nodes connected to that node that increase in rank by one,
-// and then does this recursively on all the new nodes.
+// Given a node, finds all nodes connected to that node that have a
+// slack == 0 (typically increase in rank by one), and then does this recursively on
+// all the found nodes.
 //
 // Starting with a root node, a "tight subtree" is a list of nodes whereby each included
 // edge on that node points to a node that has rank = cur_rank+1 (thus some edges will
@@ -387,6 +416,7 @@ typedef struct subtree_s {
 // * rank(e1) - rank(e2) = min_rank_diff, where min_rank_diff is typilcally one.
 //   * so the rank of rank(e1) == rank(e2) - min_rank_diff
 //
+// Pseudocode:
 // * for each incoming edge of v:
 //   * if already a TREE_EDGE in this or another subtree (edge.tree_index < 0), skip it
 //   * if the edge has slack zero (length == min_length)
@@ -394,14 +424,10 @@ typedef struct subtree_s {
 // * for each outgoing edge of v:
 //   * same as for the incoming edge, but recursively look at the head node instead of
 //     the tail.
-// KAP: ND_subtree(n) == uses the ND_par(n) field which is overwritten in init_cutvalues().
-//      which will be called shortly after this.
-//      Populate: 
-//        * Tree_node.list
-//        * For each node: ND_out() and ND_in()
-//        * Note that these are only set for edges that are in the newly discovered tree,
-//          not all edges in the graph
-/* find initial tight subtrees */
+//
+// NOTE: ND_subtree(n) uses the ND_par(n) field which is overwritten in init_cutvalues(),
+//       which will be called shortly after this.  So the list of subtrees does not
+//       persist for long.
 static int tight_subtree_search(Agnode_t *v, subtree_t *st)
 {
     Agedge_t *e;
@@ -446,8 +472,8 @@ static int tight_subtree_search(Agnode_t *v, subtree_t *st)
 // Allocate memory for a new subtree struct, and then
 // find the subtree within the graph for node v and return it.
 // 
-// Parent is set to itself for now, which means the subtree has
-// no parent.
+// The parent (par) field is set to itself for now, which means the
+// subtree has no parent.
 static subtree_t *find_tight_subtree(Agnode_t *v)
 {
     subtree_t       *rv;
@@ -470,8 +496,9 @@ typedef struct STheap_s {
 
 // Given a node, return the root of that node's subtree.
 // 
-// Has the side effect of compresing the path to the root
-// by skipping non-root parents of nodes searched.
+// This has the side effect of compresing the path to the root
+// by skipping non-root parents of nodes searched and saving them
+// back to the parent.
 static subtree_t *STsetFind(Agnode_t *n0)
 {
   subtree_t *s0 = ND_subtree(n0);
@@ -488,12 +515,13 @@ static subtree_t *STsetFind(Agnode_t *n0)
 // * However, the pointer to the new sub_tree is the same as the root that it replaces,
 //   so the pointer to the merged sub_tree is in fact in the heap.
 //
+// Pseudocode:
 // * Find the root of each subtree-- one of these will become the merged tree
 //   * At least one of the root trees must still be in the heap
 //   * If one is not in the heap, choose the other one
 //   * Otherwise, choose the larger one of the two roots.
 // * Now that we have selected the root tree, we base the new
-//   medrged tree off of that one:
+//   merged tree off of that one:
 //   * preserve the start_none, parent_node and heap_index
 //   * merged size = s0.size + s1.size
 //   * set the parents of the old roots to the new one.
@@ -533,13 +561,13 @@ static subtree_t *STsetUnion(subtree_t *s0, subtree_t *s1)
   // The size of the new subtree is the combined size of the old ones
   r->size = r0->size + r1->size;
 
-  // The heap index of the new tree is valid (indeed it is the same
+  // The heap index of the new tree must be valid (indeed it is the same
   // heap index as one of the valid sub_trees)
   assert(r->heap_index >= 0);
   return r;
 }
 
-/* find tightest edge to another tree incident on the given tree */
+// Find tightest edge to another tree incident on the given tree.
 static Agedge_t *inter_tree_edge_search(Agnode_t *v, Agnode_t *from, Agedge_t *best)
 {
     int i;
@@ -555,16 +583,16 @@ static Agedge_t *inter_tree_edge_search(Agnode_t *v, Agnode_t *from, Agedge_t *b
           best = inter_tree_edge_search(aghead(e),v,best); // search forward in tree
       }
       else {
-        // If the non-tree edge is not part of this subtree...thus it connects
-        // thus subtree to another
-        if (STsetFind(aghead(e)) != ts) {   // encountered candidate edge
+        // If the non-tree edge is not part of this subtree it must
+        // connect one subtree to another, making it a candidate edge.
+        if (STsetFind(aghead(e)) != ts) {
           // If it has the lowest slack we have seen so far, select this edge
           if (best == 0 || SLACK(e) < SLACK(best)) best = e;
         }
-        /* else ignore non-tree edge between nodes in the same tree */
+        // else ignore non-tree edge between nodes in the same tree 
       }
     }
-    /* the following code must mirror the above, but for in-edges */
+    // the following code must mirror the above, but for in-edges.
     for (i = 0; (e = ND_in(v).list[i]); i++) {
       if (TREE_EDGE(e)) {
           if (agtail(e) == from) continue;
@@ -586,9 +614,10 @@ static Agedge_t *inter_tree_edge_search(Agnode_t *v, Agnode_t *from, Agedge_t *b
 //   is returned.
 // * If no non-tree edge is found that connects to other sub_trees, zero is returned.
 // 
+// NOTE:
 // * An "edge incident on a tree" refers to an edge that connects a vertex of the tree to a vertex outside the tree.
 // * The tighetest possible edge has a slack of zero (generally a rank increase of 1), so any node that increases rank
-//   by one will do.  If the slack is not zero, then it is not tight.
+//   by one will do.  If the slack is not zero, then it is not "tight".
 static Agedge_t *inter_tree_edge(subtree_t *tree)
 {
     Agedge_t *rv;
@@ -605,7 +634,7 @@ int STheapsize(STheap_t *heap) { return heap->size; }
 // * Takes only log2(n-i) steps to complete.
 // * Stops when i has moved into the position where it is now the smallest.
 //   * So starts with the item at position i.
-//   * Keeps pushing item lower until it is 
+//   * Keeps pushing item lower until it is.
 static 
 void STheapify(STheap_t *heap, int i)
 {
@@ -649,7 +678,7 @@ STheap_t *STbuildheap(subtree_t **elt, int size)
     return heap;
 }
 
-// Extract the smalest sized sub_tre of the heap, and
+// Extract the smalest sized sub_tree of the heap, and:
 // * set that sub_tree's heap_index to be -1, so that
 //   when it is merged, we know that it is not still in the heap
 static
@@ -687,11 +716,11 @@ void tree_adjust(Agnode_t *v, Agnode_t *from, int delta)
 
 // Merge two sub trees on each side of edge e, and add e to the building tree.
 //
-// * e is not a tree edge
+// * e must not be a tree edge
 // * the head and the tail are in different subtrees
 // * The tree pointed to by e (root of aghead(e)) will
 //   need to have the rank of all its nodes adjusted since
-//   its now under the other subtree
+//   its now under the other subtree.
 //   * If for some reason t0 is not in the priority queue (why would that be?)
 //     we adjust the rank of t0 instead
 static
@@ -725,18 +754,27 @@ subtree_t *merge_trees(Agedge_t *e)   /* entering tree edge */
   return rv;
 }
 
-// feasible_tree calculates a initial tight tree for rank2().
+// feasible_tree() calculates a initial tight tree for: rank2()
+// * Graph must be connected, feasible.
+// * Return 1 if input graph is not connected; 0 on success.
+// * Adjust ND_rank(v) as needed.  add_tree_edge() on tight tree edges.
+// * Trees are basically lists of nodes stored in nodequeues.
+// 
+// TSE93 Section 2.2 page 7:
+// * A feasible ranking is one satisfying the length constraints l(e) ≥ δ(e) for all e.
+// * Given any ranking, not necessarily feasible, the slack of an edge is the difference of
+//   its length and its minimum length. Thus, a ranking is feasible if the slack of every edge
+//   is non-negative.
+// * An edge is tight if its slack is zero.
+// 
+// Pseudocode:
 // * for all nodes: node.subtree = 0
 // * for each node
 //   * if node.subtree == 0: find_tight_subtree(node)
 // * all subtrees created above are then merged with: merge_tree()
 // * sets cut_values for all edges in the feasible tree.
 //
-/* Construct initial tight tree. Graph must be connected, feasible.
- * Adjust ND_rank(v) as needed.  add_tree_edge() on tight tree edges.
- * trees are basically lists of nodes stored in nodequeues.
- * Return 1 if input graph is not connected; 0 on success.
- */
+// Pseudocode from TSE93 on page 9.
 static
 int feasible_tree(void)
 {
@@ -747,7 +785,6 @@ int feasible_tree(void)
   STheap_t *heap = NULL;
   int error = 0;
 
-  /* initialization */
   // Set the subtree of each node to be unset (0)
   for (n = GD_nlist(G); n; n = ND_next(n)) {
       ND_subtree_set(n,0);
@@ -757,8 +794,7 @@ int feasible_tree(void)
   // subtree for every node. However, there will likely be fewer subtrees
   // than nodes, since multiple nodes may be in a subtree.
   subtree_t **tree = gv_calloc(N_nodes, sizeof(subtree_t *));
-  /* given init_rank, find all tight subtrees */
-  // Populate "tree" with all the subtrees we can find in the graph.
+  // Populate "tree" with all the tight subtrees we can find in the graph.
   for (n = GD_nlist(G); n; n = ND_next(n)) {
         if (ND_subtree(n) == 0) {
                 tree[subtree_count] = find_tight_subtree(n);
@@ -770,7 +806,7 @@ int feasible_tree(void)
         }
   }
 
-  /* incrementally merge subtrees */
+  // incrementally merge subtrees
   heap = STbuildheap(tree,subtree_count);
   while (STheapsize(heap) > 1) {
     // Choose the smallest remaining subtree to merge.
@@ -789,8 +825,8 @@ int feasible_tree(void)
     }
     // Now that that tree has increased in size, fix the heap
     //
-    // But Tree1 is thrown away!  The only thing from the merged
-    // tree itself is the heap index!
+    // Note: tree1 is thrown away. The only thing from the merged
+    // tree itself is the heap index.
     STheapify(heap,tree1->heap_index);
   }
 
@@ -804,20 +840,19 @@ end:
   return 0;
 }
 
-// Set new cutvalues from v to the least commmon ancestor of nodes v and w,
-// and return the least common ancestor of v and w.
+// Walk up from v to LCA(v,w), setting new cutvalues.
+// Return the least common ancestor of v and w.
 //
 // SEQ(low(v), lim(w), lim(v))
 // Where:
 //   * ND_low(n) == min_tree_index(n) for nodes in subtree of n
 //   * ND_lim(n) == max_tree_index(n) for nodes in subtree of n
-//   * SEQ returns true if a <= b <= c, so if a,b,c do not decrease.
+//   * SEQ returns true if a <= b <= c, so if a,b,c does not decrease.
 // So:
 //   * min_tree_index(v) <= max_tree_index(w) <= max_tree_index(v)
-//   * So the max tree index of w is inbetween the min and max index of v
+//   * So the max tree index of w is in between the min and max index of v
 //   * This will be no longer be true after you have passed the least 
 //     common ancestor of v and w.
-/* walk up from v to LCA(v,w), setting new cutvalues. */
 static Agnode_t *treeupdate(Agnode_t * v, Agnode_t * w, int cutvalue, int dir)
 {
     edge_t *e;
@@ -831,7 +866,7 @@ static Agnode_t *treeupdate(Agnode_t * v, Agnode_t * w, int cutvalue, int dir)
 	    d = dir;
 	else
 	    d = !dir;
-        // If if the parent of e is through the tail,
+        // If the parent of e is through the tail,
         // the cutvalue of e is increased.  Otherwise it decreases.
 	if (d)
 	    ED_cutvalue(e) += cutvalue;
@@ -853,7 +888,7 @@ static Agnode_t *treeupdate(Agnode_t * v, Agnode_t * w, int cutvalue, int dir)
 // First reduces the rank of node v by delta.
 // Further recursively reduces the rank of any edge of v that
 // does not point to its parent by delta as well.  Thus the entire
-// subtree of v is reduces by delta.
+// subtree of v is reduced by delta.
 static void rerank(Agnode_t * v, int delta)
 {
     int i;
@@ -871,9 +906,8 @@ static void rerank(Agnode_t * v, int delta)
 // Add e to the tree while removing f, and update all cut values.
 // Note that in doing so, entire subtrees will be reranked.
 //
-/* e is the tree edge that is leaving and f is the nontree edge that
- * is entering.  compute new cut values, ranks, and exchange e and f.
- */
+// e is the tree edge that is leaving and f is the nontree edge that
+// is entering.
 static int
 update(edge_t * e, edge_t * f)
 {
@@ -956,11 +990,12 @@ freeTreeList (graph_t* g)
     reset_lists();
 }
 
-// KAP: LR_balance is the balance method of rank for network simplex
-//      when it is used for left-right as opposed up up-down rankings.
+// LR_balance is the balance method of rank for network simplex
+// when it is used for left-right as opposed up up-down rankings.
 //      
-// enter_edge(): given an edge, returns a non-tree edge to replace it.
-// ND_lim(n): max DFS index for nodes in sub-tree
+// NOTE:
+// * enter_edge(): given an edge, returns a non-tree edge to replace it.
+// * ND_lim(n): max DFS index for nodes in sub-tree
 static void LR_balance(void)
 {
     int delta;
@@ -978,7 +1013,6 @@ static void LR_balance(void)
         // 
         // A cut value of zero means that you have the just as many graph edges
         // crossing from the "head nodes" to the "tail nodes".
-
 	if (ED_cutvalue(e) == 0) {
 	    f = enter_edge(e);
 	    if (f == NULL)
@@ -1059,7 +1093,7 @@ static void TB_balance(void)
 
     const int Maxrank = scan_and_normalize();
 
-    /* find nodes that are not tight and move to less populated ranks */
+    // find nodes that are not tight and move to less populated ranks
     assert(Maxrank >= 0);
     // Initialize nrank to be an array of integers set to zero from 0-Maxrank
     int *nrank = gv_calloc((size_t)Maxrank + 1, sizeof(int));
@@ -1123,7 +1157,6 @@ static void TB_balance(void)
       //   Check all the ranks between high and low
       //      If there are fewer nodes on that rank than
       //        whatever rank it currently is in, switch to the rank with fewer
-      //
       if (adj) {
         if (inweight == outweight)
             ND_rank(n) = (adj == 1? low : high);
@@ -1146,7 +1179,7 @@ static void TB_balance(void)
     free(nrank);
 }
 
-// KAP: init_graph() is done just before the network simplex ago (rank2()) is run.
+// init_graph() is done just before network simplex (rank2()) is executed.
 //  * It returns true if there can be a feasible_tree in this graph.
 //    * This is only false if any edge of the tree has negative "slack".
 //    * negative "slack" means that rank_head(e) - rank_tail(e) < min_edge_length()
@@ -1245,7 +1278,7 @@ graphSize (graph_t * g, int* nn, int* ne)
 // rank2() ranks nodes using the network simplex algorithm.
 //
 // rank2() is the bottom level ranking function for dot and coresponds
-// pretty closely with the paper "A Technique for Drawing Directed Graphs".
+// pretty closely with TSE93: pseudocode on page 8
 //
 // All other ranking functions in dot eventually call this one to
 // do the low level work, including:
@@ -1253,7 +1286,6 @@ graphSize (graph_t * g, int* nn, int* ne)
 //  * dot1_rank() -> rank3() -> rank1() -> rank() -> rank2()
 //  * dot2_rank() -> rank2()
 // * dot_position() -> rank() -> rank2()
-//
 //
 /* rank:
  * Apply network simplex to rank the nodes in a graph.
@@ -1285,22 +1317,10 @@ int rank2(graph_t * g, int balance, int maxiter, int search_size)
     }
     // init_graph() initializes key global variables that will be used for network simplex
     //              and returns true if the graph
-    //  * G is a global pointer to a graph used in the network symplex file (nc.c)
-    //  * S_i is the "search" index to the last edge "entered" with enter_edge()
-    //  * N_nodes and N_edges are the count of edges and nodes in the graph.
-    // init_graph() initializes data within the nodes and edges of g for network simplex:
-    //  * ND_priority(n) is set to the number of incoming tree edges to a node.
-    //  * ND_tree_in(n) is allocated to hold all tree edges but, not set.
-    //    * will be set in feasible tree, along with ND_tree_out(n)
-    //  * ED_cutvalue(n) is central to network simplex and explained in the paper.
-    //    * All cutvalues initialized to zero here.
-    //  * ED_tree_index(e) is how far away from the tree root this edge is.
-    //    * all indexes initialied to -1 here.
     bool feasible = init_graph(g);
     // Prevents re-ranking if the graph is already ranked
     if (!feasible)
         // Rank nodes starting with those with no incoming edges as rank = 0.
-        // Other edges are 
 	init_rank();
 
     if (search_size >= 0)
@@ -1404,7 +1424,7 @@ static void x_cutval(edge_t * f)
     ED_cutvalue(f) = sum;
 }
 
-// KAP: typically returns: cut_value(e)-weight(e)
+// Typically returns: cut_value(e)-weight(e)
 //
 // * returns the weight(e) if:
 //     low_index(node_v) > lim_index(other) > lim_index(node_v)
@@ -1413,12 +1433,10 @@ static void x_cutval(edge_t * f)
 //   where:
 //      * low_index(node) == ND_low(n) - min DFS index for nodes in sub-tree (>= 1)
 //      * lim_index(node) == ND_lim(n) max DFS index for nodes in sub-tree
-//        Seems like they could have called lim(node) instead: max(node)
 // * ELSE returns the cut_value(e)-weight(e) if tree_edge(e)
-// * ELSE eturns the -weight(e)
+// * ELSE returns the -weight(e)
 //
 // And based on a few factors, may negate the number it returns
-//
 // SEQ(a,b,c) = ((a) <= (b) && (b) <= (c))
 // SEQ returns true if a <= b <= c, so if a,b,c do not decrease.
 static int x_val(edge_t * e, node_t * v, int dir)
@@ -1459,8 +1477,8 @@ static int x_val(edge_t * e, node_t * v, int dir)
     return rv;
 }
 
-// KAP: Do a recursive depth-first search to set the cur_value paramenter
-//      in each edge in the feasible tree.
+// Do a recursive depth-first search to set the cur_value paramenter
+// in each edge in the feasible tree.
 static void dfs_cutval(node_t * v, edge_t * par)
 {
     int i;
@@ -1476,26 +1494,20 @@ static void dfs_cutval(node_t * v, edge_t * par)
 	x_cutval(par);
 }
 
-/*
-* Initializes DFS range attributes (par, low, lim) over tree nodes such that:
-* ND_par(n) - parent tree edge
-* ND_low(n) - min DFS index for nodes in sub-tree (>= 1)
-* ND_lim(n) - max DFS index for nodes in sub-tree
-*/
-// KAP:
-// Initially called from init_cutvalues() with the first node in the graph, and  par=NULL and low=1
-// So the first node this is called on is sort of random, unless the node that is returned by GD_nlist
-// is specially chosen.  Perhaps it is always the first node mentioned in the graph?
+// Initializes DFS range attributes (par, low, lim) over tree nodes such that:
+// * ND_par(n) - parent tree edge
+// * ND_low(n) - min DFS index for nodes in sub-tree (>= 1)
+// * ND_lim(n) - max DFS index for nodes in sub-tree
+//
+// Initially called from init_cutvalues() with the first node in the graph, and par=NULL and low=1
 // If G is fully connected, then the depth first search will find all nodes,
 // and the first node becomes the root of the tree, with min_tree_index(G) == 1, and
 // the index increasing the farther you get from the root.
-// index(root) == 1 == min_tree_index().  It would also seem that the root would be the LCA of all
-// nodes in the tree.
+// index(root) == 1 == min_root_distance().
 //
-// * ND_low(n) == min_tree_index(n)
-// * ND_lim(n) == max_tree_index(n)
-// where tree_index is the distance of this node from the head of the tree+1 (since the root
-// node is 1)
+// * ND_low(n) == min_root_distance(n)
+// * ND_lim(n) == max_root_distance(n)
+// where tree_distance is the distance of this node from the head of the tree+1 (since the root node is 1)
 // So: A(1)
 //    / \
 //  B(2) C(2)
@@ -1527,9 +1539,7 @@ static int dfs_range_init(node_t *v, edge_t *par, int low) {
     return lim + 1;
 }
 
-/*
- * Incrementally updates DFS range attributes
- */
+// Incrementally updates DFS range attributes
 static int dfs_range(node_t * v, edge_t * par, int low)
 {
     edge_t *e;
