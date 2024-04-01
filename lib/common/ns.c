@@ -7,7 +7,7 @@
  * * This paper is referred to in the comments bellow as: TSE93
  * * Methods are commented to refer back to TSE93 so that one reading the
  *   paper can better follow the implementation.
- * * However, the implementation will inevitable vary somewhat from the paper,
+ * * However, the implementation will inevitably vary somewhat from the paper,
  *   especially for optimizations.
  */
 
@@ -44,6 +44,7 @@ static void check_cycles(graph_t * g);
 #define LENGTH(e)		(ND_rank(aghead(e)) - ND_rank(agtail(e)))
 #define SLACK(e)		(LENGTH(e) - ED_minlen(e))
 // SEQ returns true if a, b and c are in a sequence where they do not decrease: a <= b <= c
+// SEQ can be used with the ND_low() and ND_lim() to find the least common ancestor (lca) of a node.
 #define SEQ(a,b,c)		((a) <= (b) && (b) <= (c))
 // True if e is part of the current feasible tree.
 #define TREE_EDGE(e)	(ED_tree_index(e) >= 0)
@@ -60,9 +61,9 @@ static elist Tree_edge;
 // 
 // Caller must ensure that the edge is "tight" (has zero slack).
 // 
-// NOTE: The edge itself does not retain which subtree it is a member of.
+// NOTE: The edge itself does not have record of which subtree it is a member of.
 //       That can be looked up by either the head or tail node, which must be
-//       part of the same subtree.
+//       part of the same subtree to be valid.
 //
 // Set the following variables for both the head and tail nodes of edge (if they have not yet been added)
 // * ND_mark(n) (just so you don't add nodes more than once)
@@ -71,12 +72,10 @@ static elist Tree_edge;
 //   * add e to ND_tree_out(n)
 // * For the tail node:
 //   * add e to ND_tree_in(n)
-//   
-// Note that tree_in and tree_out are only for edges in the tree, not edges that are not in the tree.
 static int add_tree_edge(edge_t * e)
 {
     node_t *n;
-
+    //fprintf(stderr,"add tree edge %p %s ", (void*)e, agnameof(agtail(e))) ; fprintf(stderr,"%s\n", agnameof(aghead(e))) ;
     if (TREE_EDGE(e)) {
 	agerr(AGERR, "add_tree_edge: missing tree edge\n");
 	return -1;
@@ -109,7 +108,7 @@ static int add_tree_edge(edge_t * e)
 
 // Invalidate DFS attributes by walking up the tree from to_node till lca (inclusively).
 //
-// Called when updating tree to improve pruning in dfs_range().
+// Called when updating the feasible tree to improve pruning in dfs_range().
 // Assigns ND_low(n) = -1 for the affected nodes.
 static void invalidate_path(node_t *lca, node_t *to_node) {
     while (true) {
@@ -178,9 +177,12 @@ static void exchange_tree_edges(edge_t * e, edge_t * f)
 // init_rank() does an inital ranking to start things off for network simplex.
 //
 // NOTE: Only called by rank2() if any edge has slack less than the minimum.
-// * Thus, if ranks have not been assigned, init_rank() is called.
+// * Thus, if ranks have not been assigned, init_rank() is called.  Otherwise, it
+//   is skipped.
 //
 // This ranking will be subsequently modified by the network simplex ranking mechanism.
+//
+// Summary:
 // * All nodes with no incoming edges are placed in a queue.
 // * While we can pull the top node off the queue:
 //   * Pull the top node of the queue and make it the current node.
@@ -191,12 +193,8 @@ static void exchange_tree_edges(edge_t * e, edge_t * f)
 //       * Since the first nodes in the queue have no incloming edges, the first nodes
 //         in queue are ranked zero.
 //   * for each outgoing edge of the current node
-//
-// QUESTION: Where and what are rank values set to before init_rank()?
-//           This is important because it uses the current values of ranks
-//           to initialize the ranks.  It seems like it expects them to be set to
-//           zero or some baseline to begin with, but I have not found where
-//           that is done.
+//       * Lower the priority of the head node by one and push it on the queue
+//         if it reaches zero (meaning all in edges have been scanned)
 //
 // Documentation from TSE93 (page 9):
 // * Nodes with no unscanned in-edges are placed in a queue.
@@ -207,6 +205,12 @@ static void exchange_tree_edges(edge_t * e, edge_t * f)
 //   to viewing the graph as a poset (partially ordered set) and assigning the
 //   the minimal elements to rank 0.  These nodes are removed from the poset and the
 //   new set of minimal elements are assigned rank 1, etc
+//
+// QUESTION: Where and what are rank values set to before init_rank()?
+//           This is important because it uses the current values of ranks
+//           to initialize the ranks.  It seems like it expects them to be set to
+//           zero or some baseline to begin with, but I have not found where
+//           that is done.
 static
 void init_rank(void)
 {
@@ -376,11 +380,15 @@ static void init_cutvalues(void)
     dfs_cutval(GD_nlist(G), NULL);
 }
 
-/* functions for initial tight tree construction */
+// functions for initial tight tree construction
+
 // borrow field from network simplex - overwritten in init_cutvalues() forgive me
 #define ND_subtree(n) (subtree_t*)ND_par(n)
 #define ND_subtree_set(n,value) (ND_par(n) = (edge_t*)value)
 
+// subtree_s is a helper structure to assist in the effecient building
+// of tight subtrees.
+//
 // * heap_index is used for two purposes:
 //   * To tell if a subtree is in the heap or not (-1)
 //   * When a tree is merged, to know what its index into the heap is
@@ -397,9 +405,8 @@ typedef struct subtree_s {
 // 
 // Main helper function for: find_tight_subtree()
 //
-// Given a node, finds all nodes connected to that node that have a
-// slack == 0 (typically increase in rank by one), and then does this recursively on
-// all the found nodes.
+// Given a node, finds all nodes connected to that node that have a slack == 0 (typically
+// increase in rank by one), and then does this recursively on all the found nodes.
 //
 // Starting with a root node, a "tight subtree" is a list of nodes whereby each included
 // edge on that node points to a node that has rank = cur_rank+1 (thus some edges will
@@ -416,7 +423,7 @@ typedef struct subtree_s {
 // * rank(e1) - rank(e2) = min_rank_diff, where min_rank_diff is typilcally one.
 //   * so the rank of rank(e1) == rank(e2) - min_rank_diff
 //
-// Pseudocode:
+// Summary:
 // * for each incoming edge of v:
 //   * if already a TREE_EDGE in this or another subtree (edge.tree_index < 0), skip it
 //   * if the edge has slack zero (length == min_length)
@@ -472,8 +479,8 @@ static int tight_subtree_search(Agnode_t *v, subtree_t *st)
 // Allocate memory for a new subtree struct, and then
 // find the subtree within the graph for node v and return it.
 // 
-// The parent (par) field is set to itself for now, which means the
-// subtree has no parent.
+// The parent (par) field is set to itself for now, which signals that
+// this subtree has no parent.
 static subtree_t *find_tight_subtree(Agnode_t *v)
 {
     subtree_t       *rv;
@@ -513,9 +520,9 @@ static subtree_t *STsetFind(Agnode_t *n0)
 // * In fact, the only thing that is used in the return value is the heap index of
 //   the newly merged sub_tree.
 // * However, the pointer to the new sub_tree is the same as the root that it replaces,
-//   so the pointer to the merged sub_tree is in fact in the heap.
+//   so the pointer to the merged sub_tree is already in the heap.
 //
-// Pseudocode:
+// Summary:
 // * Find the root of each subtree-- one of these will become the merged tree
 //   * At least one of the root trees must still be in the heap
 //   * If one is not in the heap, choose the other one
@@ -643,9 +650,11 @@ void STheapify(STheap_t *heap, int i)
     do {
         left = 2*(i+1)-1;
         right = 2*(i+1);
-        if (left < heap->size && elt[left]->size < elt[i]->size) smallest = left;
-        else smallest = i;
-        if (right < heap->size && elt[right]->size < elt[smallest]->size) smallest = right;
+        smallest = i;
+        if (left < heap->size && elt[left]->size < elt[smallest]->size)
+            smallest = left;
+        if (right < heap->size && elt[right]->size < elt[smallest]->size)
+            smallest = right;
         // Keep going until i is smaller than the left and the right.  If that's true,
         // its in the right place.
         if (smallest != i) {
@@ -695,6 +704,8 @@ subtree_t *STextractmin(STheap_t *heap)
     return rv;
 }
 
+// Adjust the rank of the given node by delta, as well as all
+// other nodes in the tree via a flodding algorithm.
 static
 void tree_adjust(Agnode_t *v, Agnode_t *from, int delta)
 {
@@ -767,14 +778,14 @@ subtree_t *merge_trees(Agedge_t *e)   /* entering tree edge */
 //   is non-negative.
 // * An edge is tight if its slack is zero.
 // 
-// Pseudocode:
+// Summary:
 // * for all nodes: node.subtree = 0
 // * for each node
 //   * if node.subtree == 0: find_tight_subtree(node)
 // * all subtrees created above are then merged with: merge_tree()
 // * sets cut_values for all edges in the feasible tree.
 //
-// Pseudocode from TSE93 on page 9.
+// Pseudocode from TSE93 for feasible_tree() on page 9.
 static
 int feasible_tree(void)
 {
@@ -1287,7 +1298,7 @@ graphSize (graph_t * g, int* nn, int* ne)
 //  * dot2_rank() -> rank2()
 // * dot_position() -> rank() -> rank2()
 //
-/* rank:
+/* Original comment:
  * Apply network simplex to rank the nodes in a graph.
  * Uses ED_minlen as the internode constraint: if a->b with minlen=ml,
  * rank b - rank a >= ml.
